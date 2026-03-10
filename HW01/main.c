@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 bool isJpeg(FILE* f);
+long getZipStartOffset(FILE* f, bool isJpeg);
 
 typedef struct {
     char **fileNames;
@@ -18,8 +19,17 @@ typedef struct {
 
 
 
-int main(void) {
-    FILE *f = fopen("./test_jpeg_with_zip.jpg", "rb");
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <file>\n", argv[0]);
+        return 1;
+    }
+
+    FILE *f = fopen(argv[1], "rb");
+    if (f == NULL) {
+        perror("fopen");
+        return 1;
+    }
 
     FileStruct fileStruct = {};
 
@@ -44,18 +54,20 @@ int main(void) {
         fseek(f, 6, SEEK_CUR);
         uint16_t filesCount;
         fread(&filesCount, sizeof(uint16_t), 1, f);
-        ZipStruct zipStruct = {};
-        zipStruct.fileNames = malloc(sizeof(char *) * filesCount);
-        zipStruct.filesCount = filesCount;
-        fileStruct.zip = &zipStruct;
+        ZipStruct *zipStruct = malloc(sizeof(ZipStruct));
+        zipStruct->fileNames = malloc(sizeof(char *) * filesCount);
+        zipStruct->filesCount = filesCount;
+        fileStruct.zip = zipStruct;
 
-        // central directory link
+        // central directory link (в EOCD — от начала архива, не файла)
         fseek(f, 4, SEEK_CUR);
         uint32_t centralDirectoryLink;
         fread(&centralDirectoryLink, sizeof(uint32_t), 1, f);
 
+        long zipStart = getZipStartOffset(f, fileStruct.isJpeg);
+
         // ----- имя файлов ---
-        fseek(f, centralDirectoryLink, SEEK_SET);
+        fseek(f, zipStart + (long)centralDirectoryLink, SEEK_SET);
         for (int i = 0; i < filesCount; i++) {
             // Переход к center directory
             uint8_t centerDirectoryIdentifier[] = { 0x50, 0x4B, 0x01, 0x02 };
@@ -81,8 +93,8 @@ int main(void) {
             fread(fileName, sizeof(char), nameLen, f);
             fileName[nameLen] = '\0';
 
-            zipStruct.fileNames[i] = malloc(nameLen + 1);
-            memcpy(zipStruct.fileNames[i], fileName, nameLen + 1);
+            zipStruct->fileNames[i] = malloc(nameLen + 1);
+            memcpy(zipStruct->fileNames[i], fileName, nameLen + 1);
 
             fseek(f, extraLen + commentLen, SEEK_CUR);
         }
@@ -104,6 +116,7 @@ int main(void) {
             free(fileStruct.zip->fileNames[i]);
         }
         free(fileStruct.zip->fileNames);
+        free(fileStruct.zip);
     }
 
     fclose(f);
@@ -121,41 +134,22 @@ bool isJpeg(FILE* f) {
     return false;
 }
 
-
-
-// FF D9 - конец jpeg файла
-// 0x50 0x4B 0x03 0x04 - признак zip архива
-
-
-// EOCD
-// Байт 0-3:    сигнатура 50 4B 05 06
-// ...
-// Байт 10-11:  количество файлов        ←  сколько раз читать в цикле
-// ...
-// Байт 16-19:  смещение Central Directory  ←  куда прыгать через fseek
-//
-// Из EOCD тебе нужны только два числа: сколько файлов и где лежит Central Directory.
-
-
-// Central Directory
-// Байт 0-3:    Сигнатура (50 4B 01 02)
-// Байт 4-5:    Версия, которой создан архив
-// Байт 6-7:    Версия, нужная для распаковки
-// Байт 8-9:    Битовые флаги (шифрование и т.д.)
-// Байт 10-11:  Метод сжатия (0 = без сжатия, 8 = deflate)
-// Байт 12-13:  Время модификации файла
-// Байт 14-15:  Дата модификации файла
-// Байт 16-19:  CRC-32 (контрольная сумма данных)
-// Байт 20-23:  Сжатый размер файла
-// Байт 24-27:  Несжатый размер файла
-// Байт 28-29:  Длина имени файла (N)
-// Байт 30-31:  Длина extra field (E)
-// Байт 32-33:  Длина комментария к файлу (C)
-// Байт 34-35:  Номер диска, на котором начинается файл (легаси)
-// Байт 36-37:  Внутренние атрибуты файла
-// Байт 38-41:  Внешние атрибуты файла (права доступа и т.д.)
-// Байт 42-45:  Смещение Local File Header от начала архива
-// ─────────── конец фиксированной части (46 байт) ──────────
-// Байт 46:     Имя файла (N байт)
-// Байт 46+N:   Extra field (E байт)
-// Байт 46+N+E: Комментарий к файлу (C байт)
+long getZipStartOffset(FILE* f, bool isJpeg) {
+    if (!isJpeg) {
+        return 0;
+    }
+    rewind(f);
+    int c;
+    while ((c = fgetc(f)) != EOF) {
+        if (c == 0xFF) {
+            int c2 = fgetc(f);
+            if (c2 == EOF) {
+                break;
+            }
+            if (c2 == 0xD9) {
+                return ftell(f); /* первый байт после JPEG (EOI) */
+            }
+        }
+    }
+    return 0;
+}
