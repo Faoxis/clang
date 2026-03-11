@@ -3,47 +3,53 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdint.h>
 
-bool isJpeg(FILE* f);
-long getZipStartOffset(FILE* f, bool isJpeg);
+#define SAFE_FREE(ptr) do { free(ptr); (ptr) = NULL; } while (0)
 
-typedef struct {
-    char **fileNames;
-    uint16_t filesCount;
-} ZipStruct;
+bool is_jpeg(FILE* f);
+long get_zip_start_offset(FILE* f, bool is_jpeg);
 
 typedef struct {
-    ZipStruct *zip;
-    bool isJpeg;
-} FileStruct;
+    char **file_names;
+    uint16_t files_count;
+} zip_struct_t;
+
+typedef struct {
+    zip_struct_t *zip;
+    bool is_jpeg;
+} file_struct_t;
 
 
 
 int main(int argc, char *argv[]) {
+    int ret = 0;
+    FILE *f = NULL;
+    file_struct_t file_struct = {0};
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <file>\n", argv[0]);
-        return 1;
+        ret = 1;
+        goto cleanup;
     }
 
-    FILE *f = fopen(argv[1], "rb");
+    f = fopen(argv[1], "rb");
     if (f == NULL) {
         perror("fopen");
-        return 1;
+        ret = 1;
+        goto cleanup;
     }
 
-    FileStruct fileStruct = {};
-
     // Проверка файл на jpeg
-    fileStruct.isJpeg = isJpeg(f);
+    file_struct.is_jpeg = is_jpeg(f);
 
     // Делаем предположение, что в конце файла zip
     fseek(f, -22, SEEK_END);
-    uint8_t zipEOCD[] = { 0x50, 0x4B, 0x05, 0x06 };
+    uint8_t zip_eocd[] = { 0x50, 0x4B, 0x05, 0x06 };
     bool zip = true;
-    for (int i = 0; i < sizeof(zipEOCD); i++) {
-        u_int8_t readByte;
-        fread(&readByte, sizeof(u_int8_t), 1, f);
-        if (zipEOCD[i] != readByte) {
+    for (int i = 0; i < sizeof(zip_eocd); i++) {
+        u_int8_t read_byte;
+        fread(&read_byte, sizeof(u_int8_t), 1, f);
+        if (zip_eocd[i] != read_byte) {
             zip = false;
             break;
         }
@@ -52,94 +58,102 @@ int main(int argc, char *argv[]) {
     if (zip) {
         // count of files
         fseek(f, 6, SEEK_CUR);
-        uint16_t filesCount;
-        fread(&filesCount, sizeof(uint16_t), 1, f);
-        ZipStruct *zipStruct = malloc(sizeof(ZipStruct));
-        zipStruct->fileNames = malloc(sizeof(char *) * filesCount);
-        zipStruct->filesCount = filesCount;
-        fileStruct.zip = zipStruct;
+        uint16_t files_count;
+        fread(&files_count, sizeof(uint16_t), 1, f);
+        zip_struct_t *zip_struct = malloc(sizeof(zip_struct_t));
+        zip_struct->file_names = calloc(files_count, sizeof(char *));
+        zip_struct->files_count = files_count;
+        file_struct.zip = zip_struct;
 
         // central directory link (в EOCD — от начала архива, не файла)
         fseek(f, 4, SEEK_CUR);
-        uint32_t centralDirectoryLink;
-        fread(&centralDirectoryLink, sizeof(uint32_t), 1, f);
+        uint32_t central_directory_link;
+        fread(&central_directory_link, sizeof(uint32_t), 1, f);
 
-        long zipStart = getZipStartOffset(f, fileStruct.isJpeg);
+        long zip_start = get_zip_start_offset(f, file_struct.is_jpeg);
 
         // ----- имя файлов ---
-        fseek(f, zipStart + (long)centralDirectoryLink, SEEK_SET);
-        for (int i = 0; i < filesCount; i++) {
+        fseek(f, zip_start + (long)central_directory_link, SEEK_SET);
+        for (int i = 0; i < files_count; i++) {
             // Переход к center directory
-            uint8_t centerDirectoryIdentifier[] = { 0x50, 0x4B, 0x01, 0x02 };
-            for (int i = 0; i < sizeof(centerDirectoryIdentifier); i++) {
-                uint8_t readByte;
-                fread(&readByte, sizeof(uint8_t), 1, f);
-                if (centerDirectoryIdentifier[i] != readByte) {
+            uint8_t center_dir_id[] = { 0x50, 0x4B, 0x01, 0x02 };
+            for (int i = 0; i < sizeof(center_dir_id); i++) {
+                uint8_t read_byte;
+                fread(&read_byte, sizeof(uint8_t), 1, f);
+                if (center_dir_id[i] != read_byte) {
                     printf("Error parsing central directory");
-                    return 1;
+                    ret = 1;
+                    goto cleanup;
                 }
             }
 
             // Узнаем длину имени
             fseek(f, 24, SEEK_CUR);
-            uint16_t nameLen, extraLen, commentLen;
-            fread(&nameLen, sizeof(uint16_t), 1, f);
-            fread(&extraLen, sizeof(uint16_t), 1, f);
-            fread(&commentLen, sizeof(uint16_t), 1, f);
+            uint16_t name_len, extra_len, comment_len;
+            fread(&name_len, sizeof(uint16_t), 1, f);
+            fread(&extra_len, sizeof(uint16_t), 1, f);
+            fread(&comment_len, sizeof(uint16_t), 1, f);
 
             // Читаем имя файла
             fseek(f, 12, SEEK_CUR);
-            char fileName[nameLen + 1];
-            fread(fileName, sizeof(char), nameLen, f);
-            fileName[nameLen] = '\0';
+            char file_name[name_len + 1];
+            fread(file_name, sizeof(char), name_len, f);
+            file_name[name_len] = '\0';
 
-            zipStruct->fileNames[i] = malloc(nameLen + 1);
-            memcpy(zipStruct->fileNames[i], fileName, nameLen + 1);
+            zip_struct->file_names[i] = malloc(name_len + 1);
+            memcpy(zip_struct->file_names[i], file_name, name_len + 1);
 
-            fseek(f, extraLen + commentLen, SEEK_CUR);
+            fseek(f, extra_len + comment_len, SEEK_CUR);
         }
     }
 
     // Печатаем результат
-    if (fileStruct.isJpeg) {
+    if (file_struct.is_jpeg) {
         printf("Файл содержит jpeg контент\n");
     } else {
         printf("Файл не содержит jpeg контента\n");
     }
-    if (!fileStruct.zip) {
+    if (!file_struct.zip) {
         printf("Файл не содержит zip контента\n");
     } else {
         printf("В файле есть контент с zip архивом\n");
-        printf("Всего в архиве %d файлов:\n", fileStruct.zip->filesCount);
-        for (int i = 0; i < fileStruct.zip->filesCount; i++) {
-            printf("%s\n", fileStruct.zip->fileNames[i]);
-            free(fileStruct.zip->fileNames[i]);
+        printf("Всего в архиве %d файлов:\n", file_struct.zip->files_count);
+        for (int i = 0; i < file_struct.zip->files_count; i++) {
+            printf("%s\n", file_struct.zip->file_names[i]);
         }
-        free(fileStruct.zip->fileNames);
-        free(fileStruct.zip);
     }
 
-    fclose(f);
-    return 0;
+    cleanup:
+        if (file_struct.zip) {
+            for (int i = 0; i < file_struct.zip->files_count; i++) {
+                SAFE_FREE(file_struct.zip->file_names[i]);
+            }
+            SAFE_FREE(file_struct.zip->file_names);
+            SAFE_FREE(file_struct.zip);
+        }
+        if (f) {
+            fclose(f);
+            f = NULL;
+        }
+        return ret;
 }
 
-bool isJpeg(FILE* f) {
-    uint8_t firstByteInHeader, secondByteInHeader;
-    fread(&firstByteInHeader, sizeof(uint8_t), 1, f);
-    fread(&secondByteInHeader, sizeof(uint8_t), 1, f);
+bool is_jpeg(FILE* f) {
+    uint8_t first_byte, second_byte;
+    fread(&first_byte, sizeof(uint8_t), 1, f);
+    fread(&second_byte, sizeof(uint8_t), 1, f);
 
-    if (firstByteInHeader == 0xFF && secondByteInHeader == 0xD8) {
-        return true;
-    }
-    return false;
+    return first_byte == 0xFF && second_byte == 0xD8;
 }
 
-long getZipStartOffset(FILE* f, bool isJpeg) {
-    if (!isJpeg) {
+long get_zip_start_offset(FILE* f, bool is_jpeg) {
+    if (!is_jpeg) {
         return 0;
     }
+
     rewind(f);
     int c;
+    long first_byte_after_jpeg = 0;
     while ((c = fgetc(f)) != EOF) {
         if (c == 0xFF) {
             int c2 = fgetc(f);
@@ -147,9 +161,9 @@ long getZipStartOffset(FILE* f, bool isJpeg) {
                 break;
             }
             if (c2 == 0xD9) {
-                return ftell(f); /* первый байт после JPEG (EOI) */
+                first_byte_after_jpeg = ftell(f); /* первый байт после JPEG (EOI) */
             }
         }
     }
-    return 0;
+    return first_byte_after_jpeg;
 }
