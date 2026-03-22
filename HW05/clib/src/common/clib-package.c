@@ -664,6 +664,10 @@ clib_package_new_from_slug_with_package_name(const char *slug, int verbose,
       json = res->data;
       _debug("status: %d", res->status);
       if (!res || !res->ok) {
+        if (res) {
+          free(res);
+          res = NULL;
+        }
         goto download;
       }
       log = "fetch";
